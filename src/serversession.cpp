@@ -24,13 +24,14 @@ using namespace std;
 using namespace boost::asio::ip;
 using namespace boost::asio::ssl;
 
-ServerSession::ServerSession(const Config &config, boost::asio::io_service &io_service, context &ssl_context, Authenticator *auth) :
+ServerSession::ServerSession(const Config &config, boost::asio::io_service &io_service, context &ssl_context, Authenticator *auth, const string &plain_http_response) :
     Session(config, io_service),
     status(HANDSHAKE),
     in_socket(io_service, ssl_context),
     out_socket(io_service),
     udp_resolver(io_service),
-    auth(auth) {}
+    auth(auth),
+    plain_http_response(plain_http_response) {}
 
 tcp::socket& ServerSession::accept_socket() {
     return (tcp::socket&)in_socket.lowest_layer();
@@ -43,6 +44,13 @@ void ServerSession::start() {
     in_socket.async_handshake(stream_base::server, [this, self](const boost::system::error_code error) {
         if (error) {
             Log::log_with_endpoint(in_endpoint, "SSL handshake failed: " + error.message(), Log::ERROR);
+            if (error.message() == "http request" && plain_http_response != "") {
+                sent_len += plain_http_response.length();
+                boost::asio::async_write(accept_socket(), boost::asio::buffer(plain_http_response), [this, self](const boost::system::error_code, size_t) {
+                    destroy();
+                });
+                return;
+            }
             destroy();
             return;
         }
@@ -152,18 +160,18 @@ void ServerSession::in_recv(const string &data) {
         }
         sent_len += out_write_buf.length();
         auto self = shared_from_this();
-        resolver.async_resolve(query, [this, self](const boost::system::error_code error, tcp::resolver::iterator iterator) {
+        resolver.async_resolve(query, [this, self, query](const boost::system::error_code error, tcp::resolver::iterator iterator) {
             if (error) {
-                Log::log_with_endpoint(in_endpoint, "cannot resolve remote server hostname: " + error.message(), Log::ERROR);
+                Log::log_with_endpoint(in_endpoint, "cannot resolve remote server hostname " + query.host_name() + ": " + error.message(), Log::ERROR);
                 destroy();
                 return;
             }
             out_socket.open(iterator->endpoint().protocol());
-            if (config.tcp.keep_alive) {
-                out_socket.set_option(boost::asio::socket_base::keep_alive(true));
-            }
             if (config.tcp.no_delay) {
                 out_socket.set_option(tcp::no_delay(true));
+            }
+            if (config.tcp.keep_alive) {
+                out_socket.set_option(boost::asio::socket_base::keep_alive(true));
             }
 #ifdef TCP_FASTOPEN_CONNECT
             if (config.tcp.fast_open) {
@@ -172,9 +180,9 @@ void ServerSession::in_recv(const string &data) {
                 out_socket.set_option(fastopen_connect(true), ec);
             }
 #endif // TCP_FASTOPEN_CONNECT
-            out_socket.async_connect(*iterator, [this, self](const boost::system::error_code error) {
+            out_socket.async_connect(*iterator, [this, self, query](const boost::system::error_code error) {
                 if (error) {
-                    Log::log_with_endpoint(in_endpoint, "cannot establish connection to remote server: " + error.message(), Log::ERROR);
+                    Log::log_with_endpoint(in_endpoint, "cannot establish connection to remote server " + query.host_name() + ':' + query.service_name() + ": " + error.message(), Log::ERROR);
                     destroy();
                     return;
                 }
@@ -220,7 +228,7 @@ void ServerSession::out_sent() {
 
 void ServerSession::udp_recv(const string &data, const udp::endpoint &endpoint) {
     if (status == UDP_FORWARD) {
-        uint16_t length = data.length();
+        size_t length = data.length();
         Log::log_with_endpoint(in_endpoint, "received a UDP packet of length " + to_string(length) + " bytes from " + endpoint.address().to_string() + ':' + to_string(endpoint.port()));
         recv_len += length;
         in_async_write(UDPPacket::generate(endpoint, data));
@@ -244,9 +252,9 @@ void ServerSession::udp_sent() {
         udp_data_buf = udp_data_buf.substr(packet_len);
         udp::resolver::query query(packet.address.address, to_string(packet.address.port));
         auto self = shared_from_this();
-        udp_resolver.async_resolve(query, [this, self, packet](const boost::system::error_code error, udp::resolver::iterator iterator) {
+        udp_resolver.async_resolve(query, [this, self, packet, query](const boost::system::error_code error, udp::resolver::iterator iterator) {
             if (error) {
-                Log::log_with_endpoint(in_endpoint, "cannot resolve remote server hostname: " + error.message(), Log::ERROR);
+                Log::log_with_endpoint(in_endpoint, "cannot resolve remote server hostname " + query.host_name() + ": " + error.message(), Log::ERROR);
                 destroy();
                 return;
             }

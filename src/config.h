@@ -22,18 +22,22 @@
 
 #include <cstdint>
 #include <map>
+#include <boost/property_tree/ptree.hpp>
 #include "log.h"
 
 class Config {
 public:
     enum RunType {
         SERVER,
-        CLIENT
+        CLIENT,
+        FORWARD
     } run_type;
     std::string local_addr;
     uint16_t local_port;
     std::string remote_addr;
     uint16_t remote_port;
+    std::string target_addr;
+    uint16_t target_port;
     std::map<std::string, std::string> password;
     bool append_payload;
     Log::Level log_level;
@@ -49,15 +53,16 @@ public:
         std::string sni;
         std::string alpn;
         bool reuse_session;
+        bool session_ticket;
         long session_timeout;
+        std::string plain_http_response;
         std::string curves;
-        std::string sigalgs;
         std::string dhparam;
     } ssl;
     class TCPConfig {
     public:
-        bool keep_alive;
         bool no_delay;
+        bool keep_alive;
         bool fast_open;
         int fast_open_qlen;
     } tcp;
@@ -71,7 +76,11 @@ public:
         std::string password;
     } mysql;
     void load(const std::string &filename);
+    void populate(const std::string &JSON);
+    bool sip003();
     static std::string SHA224(const std::string &message);
+private:
+    void populate(const boost::property_tree::ptree &tree);
 };
 
 #endif // _CONFIG_H_

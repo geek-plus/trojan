@@ -18,7 +18,9 @@
  */
 
 #include "config.h"
-#include <boost/property_tree/ptree.hpp>
+#include <cstdlib>
+#include <sstream>
+#include <stdexcept>
 #include <boost/property_tree/json_parser.hpp>
 #include <openssl/sha.h>
 using namespace std;
@@ -27,11 +29,31 @@ using namespace boost::property_tree;
 void Config::load(const string &filename) {
     ptree tree;
     read_json(filename, tree);
-    run_type = (tree.get("run_type", string("client")) == "server") ? SERVER : CLIENT;
+    populate(tree);
+}
+
+void Config::populate(const std::string &JSON) {
+    istringstream s(JSON);
+    ptree tree;
+    read_json(s, tree);
+    populate(tree);
+}
+
+void Config::populate(const ptree &tree) {
+    string rt = tree.get("run_type", string("client"));
+    if (rt == "server") {
+        run_type = SERVER;
+    } else if (rt == "forward") {
+        run_type = FORWARD;
+    } else {
+        run_type = CLIENT;
+    }
     local_addr = tree.get("local_addr", string());
     local_port = tree.get("local_port", uint16_t());
     remote_addr = tree.get("remote_addr", string());
     remote_port = tree.get("remote_port", uint16_t());
+    target_addr = tree.get("target_addr", string());
+    target_port = tree.get("target_port", uint16_t());
     map<string, string>().swap(password);
     for (auto& item: tree.get_child("password")) {
         string p = item.second.get_value<string>();
@@ -54,20 +76,45 @@ void Config::load(const string &filename) {
         ssl.alpn += proto;
     }
     ssl.reuse_session = tree.get("ssl.reuse_session", true);
-    ssl.session_timeout = tree.get("ssl.session_timeout", long(300));
+    ssl.session_ticket = tree.get("ssl.session_ticket", false);
+    ssl.session_timeout = tree.get("ssl.session_timeout", long(600));
+    ssl.plain_http_response = tree.get("ssl.plain_http_response", string());
     ssl.curves = tree.get("ssl.curves", string());
-    ssl.sigalgs = tree.get("ssl.sigalgs", string());
     ssl.dhparam = tree.get("ssl.dhparam", string());
-    tcp.keep_alive = tree.get("tcp.keep_alive", true);
     tcp.no_delay = tree.get("tcp.no_delay", true);
-    tcp.fast_open = tree.get("tcp.fast_open", true);
-    tcp.fast_open_qlen = tree.get("tcp.fast_open_qlen", 5);
+    tcp.keep_alive = tree.get("tcp.keep_alive", true);
+    tcp.fast_open = tree.get("tcp.fast_open", false);
+    tcp.fast_open_qlen = tree.get("tcp.fast_open_qlen", 20);
     mysql.enabled = tree.get("mysql.enabled", false);
     mysql.server_addr = tree.get("mysql.server_addr", string("127.0.0.1"));
     mysql.server_port = tree.get("mysql.server_port", uint16_t(3306));
     mysql.database = tree.get("mysql.database", string("trojan"));
     mysql.username = tree.get("mysql.username", string("trojan"));
     mysql.password = tree.get("mysql.password", string());
+}
+
+bool Config::sip003() {
+    char *JSON = getenv("SS_PLUGIN_OPTIONS");
+    if (JSON == NULL) {
+        return false;
+    }
+    populate(JSON);
+    switch (run_type) {
+        case SERVER:
+            local_addr = getenv("SS_REMOTE_HOST");
+            local_port = atoi(getenv("SS_REMOTE_PORT"));
+            break;
+        case CLIENT:
+            throw runtime_error("SIP003 with wrong run_type");
+            break;
+        case FORWARD:
+            remote_addr = getenv("SS_REMOTE_HOST");
+            remote_port = atoi(getenv("SS_REMOTE_PORT"));
+            local_addr = getenv("SS_LOCAL_HOST");
+            local_port = atoi(getenv("SS_LOCAL_PORT"));
+            break;
+    }
+    return true;
 }
 
 string Config::SHA224(const string &message) {

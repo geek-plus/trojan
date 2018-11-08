@@ -17,28 +17,20 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef _AUTHENTICATOR_H_
-#define _AUTHENTICATOR_H_
+#ifndef _SSLSESSION_H_
+#define _SSLSESSION_H_
 
-#ifdef ENABLE_MYSQL
-#include <mysql.h>
-#endif // ENABLE_MYSQL
-#include "config.h"
+#include <list>
+#include <openssl/ssl.h>
 
-class Authenticator {
+class SSLSession {
 private:
-#ifdef ENABLE_MYSQL
-    MYSQL con;
-#endif // ENABLE_MYSQL
-    enum {
-        PASSWORD_LENGTH=56
-    };
-    bool is_valid_password(const std::string &password);
+    static std::list<SSL_SESSION*>sessions;
+    static int new_session_cb(SSL*, SSL_SESSION *session);
+    static void remove_session_cb(SSL_CTX*, SSL_SESSION *session);
 public:
-    Authenticator(const Config &config);
-    bool auth(const std::string &password);
-    void record(const std::string &password, uint64_t download, uint64_t upload);
-    ~Authenticator();
+    static SSL_SESSION *get_session();
+    static void set_callback(SSL_CTX *context);
 };
 
-#endif // _AUTHENTICATOR_H_
+#endif // _SSLSESSION_H_

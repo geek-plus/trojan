@@ -17,24 +17,19 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef _CLIENTSESSION_H_
-#define _CLIENTSESSION_H_
+#ifndef _FORWARDSESSION_H_
+#define _FORWARDSESSION_H_
 
 #include "session.h"
 #include <boost/asio/ssl.hpp>
 
-class ClientSession : public Session {
+class ForwardSession : public Session {
 private:
     enum Status {
-        HANDSHAKE,
-        REQUEST,
         CONNECT,
         FORWARD,
-        UDP_FORWARD,
-        INVALID,
         DESTROY
     } status;
-    bool is_udp;
     bool first_packet_recv;
     boost::asio::ip::tcp::socket in_socket;
     boost::asio::ssl::stream<boost::asio::ip::tcp::socket>out_socket;
@@ -47,14 +42,10 @@ private:
     void out_async_write(const std::string &data);
     void out_recv(const std::string &data);
     void out_sent();
-    void udp_async_read();
-    void udp_async_write(const std::string &data, const boost::asio::ip::udp::endpoint &endpoint);
-    void udp_recv(const std::string &data, const boost::asio::ip::udp::endpoint &endpoint);
-    void udp_sent();
 public:
-    ClientSession(const Config &config, boost::asio::io_service &io_service, boost::asio::ssl::context &ssl_context);
+    ForwardSession(const Config &config, boost::asio::io_service &io_service, boost::asio::ssl::context &ssl_context);
     boost::asio::ip::tcp::socket& accept_socket();
     void start();
 };
 
-#endif // _CLIENTSESSION_H_
+#endif // _FORWARDSESSION_H_

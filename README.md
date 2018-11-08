@@ -1,6 +1,6 @@
 # trojan
 
-[![Build Status](https://travis-ci.org/trojan-gfw/trojan.svg?branch=master)](https://travis-ci.org/trojan-gfw/trojan)
+[![Build Status](https://travis-ci.org/trojan-gfw/trojan.svg?branch=master)](https://travis-ci.org/trojan-gfw/trojan) [![Build Status](https://ci.appveyor.com/api/projects/status/e0ulqwb44i7j5gkl/branch/master?svg=true)](https://ci.appveyor.com/project/GreaterFire/trojan/branch/master)
 
 An unidentifiable mechanism that helps you bypass GFW.
 
@@ -15,10 +15,10 @@ Installation guide on various platforms can be found in the [wiki](https://githu
 
 ## Dependencies
 
-- [CMake](https://cmake.org/) >= 3.0.2
+- [CMake](https://cmake.org/) >= 3.7.2
 - [Boost](http://www.boost.org/) >= 1.54.0
 - [OpenSSL](https://www.openssl.org/) >= 1.0.2
-- [libmysqlclient](https://dev.mysql.com/downloads/connector/c/) (or [libmariadbclient](https://mariadb.org/))
+- [libmysqlclient](https://dev.mysql.com/downloads/connector/c/)
 
 ## License
 

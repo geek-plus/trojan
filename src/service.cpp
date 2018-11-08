@@ -18,58 +18,37 @@
  */
 
 #include "service.h"
+#include <cstring>
+#include <cerrno>
+#include <stdexcept>
+#include <fstream>
 #ifdef _WIN32
 #include <wincrypt.h>
 #endif // _WIN32
+#include <openssl/opensslv.h>
 #include "serversession.h"
 #include "clientsession.h"
+#include "forwardsession.h"
 #include "ssldefaults.h"
+#include "sslsession.h"
 using namespace std;
 using namespace boost::asio::ip;
 using namespace boost::asio::ssl;
 
-Service::Service(Config &config) :
+Service::Service(Config &config, bool test) :
     config(config),
-    socket_acceptor(io_service, tcp::endpoint(address::from_string(config.local_addr), config.local_port)),
+    socket_acceptor(io_service),
     ssl_context(context::sslv23),
     auth(nullptr) {
+    if (!test) {
+        auto listen_endpoint = tcp::endpoint(address::from_string(config.local_addr), config.local_port);
+        socket_acceptor.open(listen_endpoint.protocol());
+        socket_acceptor.set_option(tcp::acceptor::reuse_address(true));
+        socket_acceptor.bind(listen_endpoint);
+        socket_acceptor.listen();
+    }
     Log::level = config.log_level;
-    if (config.tcp.keep_alive) {
-        socket_acceptor.set_option(boost::asio::socket_base::keep_alive(true));
-    }
-    if (config.tcp.no_delay) {
-        socket_acceptor.set_option(tcp::no_delay(true));
-    }
-#ifdef TCP_FASTOPEN
-    if (config.tcp.fast_open) {
-        using fastopen = boost::asio::detail::socket_option::integer<IPPROTO_TCP, TCP_FASTOPEN>;
-        boost::system::error_code ec;
-        socket_acceptor.set_option(fastopen(config.tcp.fast_open_qlen), ec);
-    }
-#else
-    if (config.tcp.fast_open) {
-        Log::log_with_date_time("TCP_FASTOPEN is not supported", Log::WARN);
-    }
-#endif // TCP_FASTOPEN
-#ifndef TCP_FASTOPEN_CONNECT
-    if (config.tcp.fast_open) {
-        Log::log_with_date_time("TCP_FASTOPEN_CONNECT is not supported", Log::WARN);
-    }
-#endif // TCP_FASTOPEN_CONNECT
     auto native_context = ssl_context.native_handle();
-    if (config.ssl.sigalgs != "") {
-        SSL_CONF_CTX *cctx = SSL_CONF_CTX_new();
-        SSL_CONF_CTX_set_ssl_ctx(cctx, native_context);
-        SSL_CONF_CTX_set_flags(cctx, SSL_CONF_FLAG_CMDLINE);
-        if (config.run_type == Config::SERVER) {
-            SSL_CONF_CTX_set_flags(cctx, SSL_CONF_FLAG_SERVER);
-        } else {
-            SSL_CONF_CTX_set_flags(cctx, SSL_CONF_FLAG_CLIENT);
-        }
-        SSL_CONF_cmd(cctx, "-sigalgs", config.ssl.sigalgs.c_str());
-        SSL_CONF_CTX_finish(cctx);
-        SSL_CONF_CTX_free(cctx);
-    }
     ssl_context.set_options(context::default_workarounds | context::no_sslv2 | context::no_sslv3 | context::single_dh_use);
     if (config.ssl.curves != "") {
         SSL_CTX_set1_curves_list(native_context, config.ssl.curves.c_str());
@@ -93,20 +72,39 @@ Service::Service(Config &config) :
         }
         if (config.ssl.reuse_session) {
             SSL_CTX_set_timeout(native_context, config.ssl.session_timeout);
+            if (!config.ssl.session_ticket) {
+                SSL_CTX_set_options(native_context, SSL_OP_NO_TICKET);
+            }
         } else {
             SSL_CTX_set_session_cache_mode(native_context, SSL_SESS_CACHE_OFF);
             SSL_CTX_set_options(native_context, SSL_OP_NO_TICKET);
+        }
+        if (config.ssl.plain_http_response != "") {
+            ifstream ifs(config.ssl.plain_http_response, ios::binary);
+            if (!ifs.is_open()) {
+                throw runtime_error(config.ssl.plain_http_response + ": " + strerror(errno));
+            }
+            plain_http_response = string(istreambuf_iterator<char>(ifs), istreambuf_iterator<char>());
         }
         if (config.ssl.dhparam == "") {
             ssl_context.use_tmp_dh(boost::asio::const_buffer(SSLDefaults::g_dh2048_sz, SSLDefaults::g_dh2048_sz_size));
         } else {
             ssl_context.use_tmp_dh_file(config.ssl.dhparam);
         }
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
         SSL_CTX_set_ecdh_auto(native_context, 1);
+#endif
         if (config.mysql.enabled) {
+#ifdef ENABLE_MYSQL
             auth = new Authenticator(config);
+#else // ENABLE_MYSQL
+            Log::log_with_date_time("MySQL is not supported", Log::WARN);
+#endif // ENABLE_MYSQL
         }
     } else {
+        if (config.ssl.sni == "") {
+            config.ssl.sni = config.remote_addr;
+        }
         if (config.ssl.verify) {
             ssl_context.set_verify_mode(verify_peer);
             if (config.ssl.cert == "") {
@@ -143,16 +141,67 @@ Service::Service(Config &config) :
         if (config.ssl.alpn != "") {
             SSL_CTX_set_alpn_protos(native_context, (unsigned char*)(config.ssl.alpn.c_str()), config.ssl.alpn.length());
         }
+        if (config.ssl.reuse_session) {
+            SSL_CTX_set_session_cache_mode(native_context, SSL_SESS_CACHE_CLIENT);
+            SSLSession::set_callback(native_context);
+            if (!config.ssl.session_ticket) {
+                SSL_CTX_set_options(native_context, SSL_OP_NO_TICKET);
+            }
+        } else {
+            SSL_CTX_set_options(native_context, SSL_OP_NO_TICKET);
+        }
     }
     if (config.ssl.cipher != "") {
         SSL_CTX_set_cipher_list(native_context, config.ssl.cipher.c_str());
+    }
+    if (!test) {
+        if (config.tcp.no_delay) {
+            socket_acceptor.set_option(tcp::no_delay(true));
+        }
+        if (config.tcp.keep_alive) {
+            socket_acceptor.set_option(boost::asio::socket_base::keep_alive(true));
+        }
+#ifdef TCP_FASTOPEN
+        if (config.tcp.fast_open) {
+            using fastopen = boost::asio::detail::socket_option::integer<IPPROTO_TCP, TCP_FASTOPEN>;
+            boost::system::error_code ec;
+            socket_acceptor.set_option(fastopen(config.tcp.fast_open_qlen), ec);
+        }
+#else // TCP_FASTOPEN
+        if (config.tcp.fast_open) {
+            Log::log_with_date_time("TCP_FASTOPEN is not supported", Log::WARN);
+        }
+#endif // TCP_FASTOPEN
+#ifndef TCP_FASTOPEN_CONNECT
+        if (config.tcp.fast_open) {
+            Log::log_with_date_time("TCP_FASTOPEN_CONNECT is not supported", Log::WARN);
+        }
+#endif // TCP_FASTOPEN_CONNECT
+    }
+    if (Log::keylog) {
+#ifdef ENABLE_SSL_KEYLOG
+        SSL_CTX_set_keylog_callback(native_context, [](const SSL*, const char *line) {
+            fprintf(Log::keylog, "%s\n", line);
+            fflush(Log::keylog);
+        });
+#else // ENABLE_SSL_KEYLOG
+        Log::log_with_date_time("SSL KeyLog is not supported", Log::WARN);
+#endif // ENABLE_SSL_KEYLOG
     }
 }
 
 void Service::run() {
     async_accept();
     tcp::endpoint local_endpoint = socket_acceptor.local_endpoint();
-    Log::log_with_date_time(string("trojan service (") + (config.run_type == Config::SERVER ? "server" : "client") + ") started at " + local_endpoint.address().to_string() + ':' + to_string(local_endpoint.port()), Log::FATAL);
+    string rt;
+    if (config.run_type == Config::SERVER) {
+        rt = "server";
+    } else if (config.run_type == Config::FORWARD) {
+        rt = "forward";
+    } else {
+        rt = "client";
+    }
+    Log::log_with_date_time(string("trojan service (") + rt + ") started at " + local_endpoint.address().to_string() + ':' + to_string(local_endpoint.port()), Log::FATAL);
     io_service.run();
     Log::log_with_date_time("trojan service stopped", Log::FATAL);
 }
@@ -164,7 +213,9 @@ void Service::stop() {
 void Service::async_accept() {
     shared_ptr<Session>session(nullptr);
     if (config.run_type == Config::SERVER) {
-        session = make_shared<ServerSession>(config, io_service, ssl_context, auth);
+        session = make_shared<ServerSession>(config, io_service, ssl_context, auth, plain_http_response);
+    } else if (config.run_type == Config::FORWARD) {
+        session = make_shared<ForwardSession>(config, io_service, ssl_context);
     } else {
         session = make_shared<ClientSession>(config, io_service, ssl_context);
     }
